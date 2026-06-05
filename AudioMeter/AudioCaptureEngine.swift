@@ -1,0 +1,210 @@
+import Foundation
+import Combine
+import Accelerate
+import Metal
+import CoreAudio
+import AVFAudio
+
+// MARK: - Audio Capture Engine
+// Menggunakan CATapDescription (macOS 14.2+) — pure audio, tidak ada video pipeline.
+// Jauh lebih ringan dari ScreenCaptureKit yang menjalankan video encoder di background.
+
+class AudioCaptureEngine: NSObject, ObservableObject {
+
+    // ── Published state ───────────────────────────────────────────────────
+    let waveRenderer: WaveformMetalRenderer = {
+        let dev = MTLCreateSystemDefaultDevice()!
+        return WaveformMetalRenderer(device: dev)!
+    }()
+
+    @Published var lufsM:     Float = -144.0
+    @Published var lufsS:     Float = -144.0
+    @Published var lufsMPeak: Float = -144.0
+    @Published var lufsSPeak: Float = -144.0
+    @Published var isCapturing  = false
+    @Published var errorMessage: String? = nil
+
+    // ── Private (processingQueue only) ───────────────────────────────────
+    private let lufsCalc = StereoLUFSCalculator(sampleRate: 48_000)
+    private var peakLufsM: Float = -144
+    private var peakLufsS: Float = -144
+    private var accumL: [Float] = []
+    private var accumR: [Float] = []
+    private let chunkSize = 1024
+    private var lufsUpdateAccum = 0
+    private let lufsUpdateInterval = 48_000 / 10   // 10fps LUFS updates
+
+    // ── CoreAudio tap objects ─────────────────────────────────────────────
+    private var tapObjectID:       AudioObjectID = kAudioObjectUnknown
+    private var aggregateDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var audioEngine:       AVAudioEngine?
+
+    private let processingQueue = DispatchQueue(
+        label: "audio.meter.processing", qos: .userInteractive)
+
+    // MARK: Public API
+
+    func start() async {
+        guard !isCapturing else { return }
+        do {
+            try await launchCapture()
+        } catch {
+            await MainActor.run { self.errorMessage = error.localizedDescription }
+        }
+    }
+
+    func toggle() async {
+        if isCapturing { await stop() } else { await start() }
+    }
+
+    func stop() async {
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine = nil
+        if tapObjectID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(tapObjectID)
+            tapObjectID = kAudioObjectUnknown
+        }
+        if aggregateDeviceID != kAudioObjectUnknown {
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            aggregateDeviceID = kAudioObjectUnknown
+        }
+        processingQueue.sync {
+            self.accumL.removeAll()
+            self.accumR.removeAll()
+            self.peakLufsM = -144
+            self.peakLufsS = -144
+            self.lufsUpdateAccum = 0
+        }
+        await MainActor.run { self.isCapturing = false }
+    }
+
+    // MARK: CATapDescription setup
+
+    private func launchCapture() async throws {
+        // 1. Global stereo process tap — pure audio, tidak ada video pipeline
+        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+
+        var tapID: AudioObjectID = kAudioObjectUnknown
+        let tapStatus = AudioHardwareCreateProcessTap(tapDesc, &tapID)
+        guard tapStatus == noErr else {
+            throw makeError("Cannot create audio tap (OSStatus \(tapStatus))")
+        }
+        tapObjectID = tapID
+
+        // 2. Baca UID tap
+        var uidRef: CFString? = nil
+        var uidSize = UInt32(MemoryLayout<CFString?>.size)
+        var uidAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyUID,
+            mScope:    kAudioObjectPropertyScopeGlobal,
+            mElement:  kAudioObjectPropertyElementMain)
+        let uidStatus = AudioObjectGetPropertyData(tapID, &uidAddr, 0, nil, &uidSize, &uidRef)
+        guard uidStatus == noErr, let tapUID = uidRef as String? else {
+            throw makeError("Cannot read tap UID")
+        }
+
+        // 3. Buat private aggregate device yang wrap tap
+        let aggUID = "com.audiometer.agg.\(UUID().uuidString)"
+        let aggDesc: [String: Any] = [
+            kAudioAggregateDeviceUIDKey:          aggUID,
+            kAudioAggregateDeviceNameKey:         "AudioMeterAgg",
+            kAudioAggregateDeviceIsPrivateKey:    true,
+            kAudioAggregateDeviceTapListKey:      [[kAudioSubTapUIDKey: tapUID]],
+            kAudioAggregateDeviceTapAutoStartKey: true
+        ]
+        var aggID: AudioDeviceID = kAudioObjectUnknown
+        let aggStatus = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggID)
+        guard aggStatus == noErr else {
+            throw makeError("Cannot create aggregate device (OSStatus \(aggStatus))")
+        }
+        aggregateDeviceID = aggID
+
+        // 4. AVAudioEngine dengan aggregate device sebagai input
+        let engine = AVAudioEngine()
+        guard let au = engine.inputNode.audioUnit else {
+            throw makeError("Cannot access input AudioUnit")
+        }
+        var devID = aggID
+        let setStatus = AudioUnitSetProperty(
+            au, kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global, 0,
+            &devID, UInt32(MemoryLayout<AudioDeviceID>.size))
+        guard setStatus == noErr else {
+            throw makeError("Cannot set input device (OSStatus \(setStatus))")
+        }
+
+        // 5. Install audio tap — terima AVAudioPCMBuffer, proses di processingQueue
+        let captureFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+        engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: captureFormat) {
+            [weak self] buffer, _ in
+            guard let self, let data = buffer.floatChannelData else { return }
+            let n     = Int(buffer.frameLength)
+            let left  = Array(UnsafeBufferPointer(start: data[0], count: n))
+            let right = buffer.format.channelCount >= 2
+                ? Array(UnsafeBufferPointer(start: data[1], count: n))
+                : left
+            self.processingQueue.async { self.processAudio(left: left, right: right) }
+        }
+
+        try engine.start()
+        audioEngine = engine
+
+        await MainActor.run {
+            self.isCapturing  = true
+            self.errorMessage = nil
+        }
+    }
+
+    // MARK: Audio processing
+
+    private func processAudio(left: [Float], right: [Float]) {
+        // LUFS
+        let (lm, ls) = lufsCalc.process(left: left, right: right)
+        let decayPerCallback = Float(15.0 * Double(left.count) / 48_000.0)
+        peakLufsM = max(lm, peakLufsM - decayPerCallback)
+        peakLufsS = max(ls, peakLufsS - decayPerCallback)
+
+        lufsUpdateAccum += left.count
+        if lufsUpdateAccum >= lufsUpdateInterval {
+            lufsUpdateAccum = 0
+            let m = lm; let s = ls; let pm = peakLufsM; let ps = peakLufsS
+            DispatchQueue.main.async { [weak self] in
+                self?.lufsM = m; self?.lufsS = s
+                self?.lufsMPeak = pm; self?.lufsSPeak = ps
+            }
+        }
+
+        // Waveform bars — simpan min + max per chunk (vDSP SIMD, DAW-style)
+        accumL.append(contentsOf: left)
+        accumR.append(contentsOf: right)
+        var minLArr: [Float] = [], maxLArr: [Float] = []
+        var minRArr: [Float] = [], maxRArr: [Float] = []
+
+        while accumL.count >= chunkSize {
+            var minL = Float(0), maxL = Float(0)
+            var minR = Float(0), maxR = Float(0)
+            accumL.withUnsafeBufferPointer { ptr in
+                vDSP_minv(ptr.baseAddress!, 1, &minL, vDSP_Length(chunkSize))
+                vDSP_maxv(ptr.baseAddress!, 1, &maxL, vDSP_Length(chunkSize))
+            }
+            accumR.withUnsafeBufferPointer { ptr in
+                vDSP_minv(ptr.baseAddress!, 1, &minR, vDSP_Length(chunkSize))
+                vDSP_maxv(ptr.baseAddress!, 1, &maxR, vDSP_Length(chunkSize))
+            }
+            minLArr.append(minL); maxLArr.append(maxL)
+            minRArr.append(minR); maxRArr.append(maxR)
+            accumL.removeFirst(chunkSize)
+            accumR.removeFirst(chunkSize)
+        }
+        if !minLArr.isEmpty {
+            waveRenderer.pushBars(minL: minLArr, maxL: maxLArr,
+                                  minR: minRArr, maxR: maxRArr)
+        }
+    }
+
+    private func makeError(_ msg: String) -> Error {
+        NSError(domain: "AudioMeter", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: msg])
+    }
+}

@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+*.swp
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+
+# Local build output
+build_release/
+
+# Swift Package Manager
+.build/
+Packages/
+.swiftpm/
+
+# Local Claude config / memory (not for publishing)
+.claude/
+
+# CocoaPods / Carthage (jika nanti dipakai)
+Pods/
+Carthage/Build/

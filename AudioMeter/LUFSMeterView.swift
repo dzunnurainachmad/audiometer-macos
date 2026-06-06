@@ -114,7 +114,9 @@ struct LUFSBarMeterView: View {
     }
 }
 
-// MARK: - Single vertical bar strip (Canvas-based — tidak ada GeometryReader/animation overhead)
+// MARK: - Single vertical bar strip (Canvas-based — murah, redraw hanya saat data berubah)
+// Kehalusan didapat dari rate data yang lebih tinggi (lihat AudioCaptureEngine),
+// BUKAN dari animasi SwiftUI 60fps yang bikin loop render kedua (mahal).
 
 struct BarStrip: View {
     let value:    Float

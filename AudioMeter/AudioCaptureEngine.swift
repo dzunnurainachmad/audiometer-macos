@@ -32,7 +32,7 @@ class AudioCaptureEngine: NSObject, ObservableObject {
     private var accumR: [Float] = []
     private let chunkSize = 1024
     private var lufsUpdateAccum = 0
-    private let lufsUpdateInterval = 48_000 / 10   // 10fps LUFS updates
+    private let lufsUpdateInterval = 48_000 / 24   // 24fps LUFS updates (lebih mulus)
 
     // ── CoreAudio tap objects ─────────────────────────────────────────────
     private var tapObjectID:       AudioObjectID = kAudioObjectUnknown
@@ -136,7 +136,7 @@ class AudioCaptureEngine: NSObject, ObservableObject {
 
         // 5. Install audio tap — terima AVAudioPCMBuffer, proses di processingQueue
         let captureFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
-        engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: captureFormat) {
+        engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: captureFormat) {
             [weak self] buffer, _ in
             guard let self, let data = buffer.floatChannelData else { return }
             let n     = Int(buffer.frameLength)

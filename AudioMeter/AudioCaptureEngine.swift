@@ -39,6 +39,14 @@ class AudioCaptureEngine: NSObject, ObservableObject {
     private var aggregateDeviceID: AudioObjectID = kAudioObjectUnknown
     private var audioEngine:       AVAudioEngine?
 
+    // ── Startup watchdog ──────────────────────────────────────────────────
+    // CoreAudio aggregate device + tap kadang belum "ready" saat engine start,
+    // jadi audio tidak mengalir sampai di-restart. Watchdog deteksi ini dan
+    // auto-restart, sehingga user tidak perlu klik Stop/Play manual.
+    private var didReceiveAudio = false        // processingQueue only
+    private var watchdogTask: Task<Void, Never>?
+    private var restartAttempts = 0
+
     private let processingQueue = DispatchQueue(
         label: "audio.meter.processing", qos: .userInteractive)
 
@@ -58,6 +66,8 @@ class AudioCaptureEngine: NSObject, ObservableObject {
     }
 
     func stop() async {
+        watchdogTask?.cancel()
+        watchdogTask = nil
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine = nil
@@ -75,6 +85,7 @@ class AudioCaptureEngine: NSObject, ObservableObject {
             self.peakLufsM = -144
             self.peakLufsS = -144
             self.lufsUpdateAccum = 0
+            self.didReceiveAudio = false
         }
         await MainActor.run { self.isCapturing = false }
     }
@@ -120,6 +131,10 @@ class AudioCaptureEngine: NSObject, ObservableObject {
         }
         aggregateDeviceID = aggID
 
+        // 3b. Beri CoreAudio waktu mem-publish aggregate device + tap.
+        // Tanpa ini, engine kadang start sebelum device ready → audio diam.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
         // 4. AVAudioEngine dengan aggregate device sebagai input
         let engine = AVAudioEngine()
         guard let au = engine.inputNode.audioUnit else {
@@ -154,11 +169,41 @@ class AudioCaptureEngine: NSObject, ObservableObject {
             self.isCapturing  = true
             self.errorMessage = nil
         }
+
+        startWatchdog()
+    }
+
+    // MARK: Startup watchdog
+
+    /// Cek ~1.2 dtk setelah start: kalau belum ada audio masuk, auto-restart.
+    private func startWatchdog() {
+        watchdogTask?.cancel()
+        watchdogTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard let self, !Task.isCancelled, self.isCapturing else { return }
+
+            let got = self.processingQueue.sync { self.didReceiveAudio }
+            if got {
+                self.restartAttempts = 0      // audio mengalir — sehat
+                return
+            }
+            guard self.restartAttempts < 3 else {
+                await MainActor.run {
+                    self.errorMessage = "Tidak ada audio — klik Stop lalu Play"
+                }
+                return
+            }
+            self.restartAttempts += 1
+            await self.stop()
+            await self.start()                // start() akan pasang watchdog lagi
+        }
     }
 
     // MARK: Audio processing
 
     private func processAudio(left: [Float], right: [Float]) {
+        didReceiveAudio = true   // sinyal ke watchdog: audio mengalir
+
         // LUFS
         let (lm, ls) = lufsCalc.process(left: left, right: right)
         let decayPerCallback = Float(15.0 * Double(left.count) / 48_000.0)

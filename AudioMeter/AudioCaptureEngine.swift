@@ -39,6 +39,10 @@ class AudioCaptureEngine: NSObject, ObservableObject {
     // channel device, jadi level tertangkap = source / (channel/2). Kita kalikan
     // balik. Internal 2ch → ×1 (no-op); interface multi-out → ×(channel/2).
     private var captureGain: Float = 1.0
+    // DC blocker (one-pole HPF ~4Hz) per channel — buang DC offset yang bikin
+    // garis tipis di waveform (mis. channel L sering punya bias kecil).
+    private var dcPrevXL: Float = 0, dcPrevYL: Float = 0
+    private var dcPrevXR: Float = 0, dcPrevYR: Float = 0
     private var accumL: [Float] = []
     private var accumR: [Float] = []
     // Adaptive: dijaga agar bar/detik konstan (= 48000/1024) di rate berapa pun,
@@ -88,6 +92,7 @@ class AudioCaptureEngine: NSObject, ObservableObject {
         watchdogTask?.cancel()
         watchdogTask = nil
         removeDeviceChangeListener()
+        waveRenderer.setPaused(true)   // bekukan scroll waveform
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine = nil
@@ -106,6 +111,8 @@ class AudioCaptureEngine: NSObject, ObservableObject {
             self.meterL = -144; self.meterR = -144
             self.holdL  = -144; self.holdR  = -144
             self.captureGain = 1.0
+            self.dcPrevXL = 0; self.dcPrevYL = 0
+            self.dcPrevXR = 0; self.dcPrevYR = 0
             self.lufsUpdateAccum = 0
             self.didReceiveAudio = false
         }
@@ -202,6 +209,7 @@ class AudioCaptureEngine: NSObject, ObservableObject {
 
         try engine.start()
         audioEngine = engine
+        waveRenderer.setPaused(false)   // lanjutkan scroll waveform
 
         await MainActor.run {
             self.isCapturing  = true
@@ -327,6 +335,25 @@ class AudioCaptureEngine: NSObject, ObservableObject {
             right.withUnsafeMutableBufferPointer {
                 vDSP_vsmul($0.baseAddress!, 1, &g, $0.baseAddress!, 1, vDSP_Length($0.count))
             }
+        }
+
+        // DC blocker per channel: y[n] = x[n] - x[n-1] + R*y[n-1]
+        let dcR: Float = 0.9995
+        left.withUnsafeMutableBufferPointer { p in
+            var px = dcPrevXL, py = dcPrevYL
+            for i in 0..<p.count {
+                let x = p[i]; let y = x - px + dcR * py
+                px = x; py = y; p[i] = y
+            }
+            dcPrevXL = px; dcPrevYL = py
+        }
+        right.withUnsafeMutableBufferPointer { p in
+            var px = dcPrevXR, py = dcPrevYR
+            for i in 0..<p.count {
+                let x = p[i]; let y = x - px + dcR * py
+                px = x; py = y; p[i] = y
+            }
+            dcPrevXR = px; dcPrevYR = py
         }
 
         // Short-term LUFS (cuma S yang dipakai untuk angka)

@@ -64,7 +64,8 @@ fragment float4 waveFrag(VertexOut        in   [[stage_in]],
     float barTop    = 0.5 - maxVal * 0.495;
     float barBottom = 0.5 - minVal * 0.495;
 
-    if (cy >= barTop && cy <= barBottom) {
+    // strict pada barBottom: bar tinggi-nol (silent) = tidak kerender (kosong)
+    if (cy >= barTop && cy < barBottom) {
         return isL ? float4(0.25, 0.85, 0.50, 0.88)
                    : float4(0.20, 0.65, 0.95, 0.88);
     }
@@ -90,6 +91,9 @@ final class WaveformMetalRenderer: NSObject, MTKViewDelegate {
     private var barAccum     = Double(0)
     private let barsPerFrame = 48_000.0 / (1024.0 * 60.0)
     private var writeBar     = Int(0)
+    // Saat capture berhenti: bekukan scroll supaya gambar statis tidak bergetar
+    // (scrollFrac yang terus oscillate tanpa writeBar maju = jitter sub-pixel).
+    private var paused       = false
 
     private var pendingLock  = os_unfair_lock()
     // Simpan sebagai flat array [minL, maxL, minR, maxR, ...] — satu array saja
@@ -145,6 +149,16 @@ final class WaveformMetalRenderer: NSObject, MTKViewDelegate {
         os_unfair_lock_unlock(&pendingLock)
     }
 
+    /// Bekukan/lanjutkan scroll. Dipanggil saat capture stop/start.
+    func setPaused(_ p: Bool) {
+        paused = p
+        if p {
+            os_unfair_lock_lock(&pendingLock)
+            pending.removeAll()
+            os_unfair_lock_unlock(&pendingLock)
+        }
+    }
+
     // MARK: MTKViewDelegate
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -153,9 +167,16 @@ final class WaveformMetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        barAccum += barsPerFrame
-        let toAdd = Int(barAccum)
-        barAccum -= Double(toAdd)
+        // Paused → bekukan scroll (scrollFrac=0), render frame statis tanpa jitter.
+        let toAdd: Int
+        if paused {
+            barAccum = 0
+            toAdd = 0
+        } else {
+            barAccum += barsPerFrame
+            toAdd = Int(barAccum)
+            barAccum -= Double(toAdd)
+        }
 
         if toAdd > 0 {
             os_unfair_lock_lock(&pendingLock)

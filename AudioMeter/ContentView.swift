@@ -60,9 +60,10 @@ struct ContentView: View {
 
                 dividerV
 
-                // LUFS meter — fixed-width right panel
-                LUFSBarMeterView(lufsM: engine.lufsM, lufsS: engine.lufsS,
-                                 lufsMPeak: engine.lufsMPeak, lufsSPeak: engine.lufsSPeak)
+                // Meter — fixed-width right panel (peak stereo + short LUFS)
+                LUFSBarMeterView(peakL: engine.peakL, peakR: engine.peakR,
+                                 peakHoldL: engine.peakHoldL, peakHoldR: engine.peakHoldR,
+                                 lufsS: engine.lufsS, lufsSPeak: engine.lufsSPeak)
                     .frame(width: 160)
             }
         }

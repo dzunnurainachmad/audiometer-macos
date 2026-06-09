@@ -17,17 +17,23 @@ class AudioCaptureEngine: NSObject, ObservableObject {
         return WaveformMetalRenderer(device: dev)!
     }()
 
-    @Published var lufsM:     Float = -144.0
+    // Peak meter (dBFS) — stereo, respons cepat seperti waveform
+    @Published var peakL:     Float = -144.0
+    @Published var peakR:     Float = -144.0
+    @Published var peakHoldL: Float = -144.0
+    @Published var peakHoldR: Float = -144.0
+    // Short-term LUFS (satu-satunya yang menampilkan angka)
     @Published var lufsS:     Float = -144.0
-    @Published var lufsMPeak: Float = -144.0
     @Published var lufsSPeak: Float = -144.0
     @Published var isCapturing  = false
     @Published var errorMessage: String? = nil
 
     // ── Private (processingQueue only) ───────────────────────────────────
     private let lufsCalc = StereoLUFSCalculator(sampleRate: 48_000)
-    private var peakLufsM: Float = -144
     private var peakLufsS: Float = -144
+    // Peak-meter ballistics (dBFS): attack instan, release lambat
+    private var meterL: Float = -144, meterR: Float = -144
+    private var holdL:  Float = -144, holdR:  Float = -144
     private var accumL: [Float] = []
     private var accumR: [Float] = []
     private let chunkSize = 1024
@@ -82,8 +88,9 @@ class AudioCaptureEngine: NSObject, ObservableObject {
         processingQueue.sync {
             self.accumL.removeAll()
             self.accumR.removeAll()
-            self.peakLufsM = -144
             self.peakLufsS = -144
+            self.meterL = -144; self.meterR = -144
+            self.holdL  = -144; self.holdR  = -144
             self.lufsUpdateAccum = 0
             self.didReceiveAudio = false
         }
@@ -204,19 +211,31 @@ class AudioCaptureEngine: NSObject, ObservableObject {
     private func processAudio(left: [Float], right: [Float]) {
         didReceiveAudio = true   // sinyal ke watchdog: audio mengalir
 
-        // LUFS
-        let (lm, ls) = lufsCalc.process(left: left, right: right)
-        let decayPerCallback = Float(15.0 * Double(left.count) / 48_000.0)
-        peakLufsM = max(lm, peakLufsM - decayPerCallback)
-        peakLufsS = max(ls, peakLufsS - decayPerCallback)
+        // Short-term LUFS (cuma S yang dipakai untuk angka)
+        let (_, ls) = lufsCalc.process(left: left, right: right)
+        let lufsDecay = Float(15.0 * Double(left.count) / 48_000.0)
+        peakLufsS = max(ls, peakLufsS - lufsDecay)
+
+        // Peak meter (dBFS) per kanal — attack instan, release lambat (gaya PPM)
+        var pkL: Float = 0, pkR: Float = 0
+        left.withUnsafeBufferPointer  { vDSP_maxmgv($0.baseAddress!, 1, &pkL, vDSP_Length($0.count)) }
+        right.withUnsafeBufferPointer { vDSP_maxmgv($0.baseAddress!, 1, &pkR, vDSP_Length($0.count)) }
+        let dbL = pkL > 1e-7 ? 20 * log10f(pkL) : -144
+        let dbR = pkR > 1e-7 ? 20 * log10f(pkR) : -144
+        let relDb  = Float(26.0 * Double(left.count) / 48_000.0)   // release ~26 dB/s
+        let holdDb = Float(8.0  * Double(left.count) / 48_000.0)   // peak-hold turun lambat
+        meterL = max(dbL, meterL - relDb);  meterR = max(dbR, meterR - relDb)
+        holdL  = max(dbL, holdL  - holdDb); holdR  = max(dbR, holdR  - holdDb)
 
         lufsUpdateAccum += left.count
         if lufsUpdateAccum >= lufsUpdateInterval {
             lufsUpdateAccum = 0
-            let m = lm; let s = ls; let pm = peakLufsM; let ps = peakLufsS
+            let s = ls, ps = peakLufsS
+            let mL = meterL, mR = meterR, hL = holdL, hR = holdR
             DispatchQueue.main.async { [weak self] in
-                self?.lufsM = m; self?.lufsS = s
-                self?.lufsMPeak = pm; self?.lufsSPeak = ps
+                self?.lufsS = s; self?.lufsSPeak = ps
+                self?.peakL = mL; self?.peakR = mR
+                self?.peakHoldL = hL; self?.peakHoldR = hR
             }
         }
 

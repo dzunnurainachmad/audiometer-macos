@@ -1,17 +1,26 @@
 import SwiftUI
 
-// MARK: - Vertical bar LUFS meter (right-side panel)
+// MARK: - Meter panel (right-side)
+// Kiri: Peak Meter stereo (L/R, dBFS) — respons cepat seperti waveform, garis
+//       peak-hold oranye. Kanan: Short-term LUFS (1 bar) + angka.
+// Angka hanya ditampilkan untuk Short.
 
 struct LUFSBarMeterView: View {
-    let lufsM: Float
-    let lufsS: Float
-    let lufsMPeak: Float
+    let peakL:     Float   // dBFS
+    let peakR:     Float
+    let peakHoldL: Float
+    let peakHoldR: Float
+    let lufsS:     Float   // LUFS
     let lufsSPeak: Float
 
     private let rangeMax: Float =   0
     private let rangeMin: Float = -50
 
-    private let marks: [(label: String, lufs: Float)] = [
+    private let peakColor  = Color(red: 0.74, green: 0.78, blue: 0.92)
+    private let holdColor  = Color(red: 0.97, green: 0.62, blue: 0.20)
+    private let shortColor = Color(red: 0.62, green: 0.66, blue: 0.82)
+
+    private let marks: [(label: String, db: Float)] = [
         ("0",   0),
         ("6",  -6),
         ("12", -12),
@@ -30,7 +39,7 @@ struct LUFSBarMeterView: View {
                 // ── Scale: numbers + ticks ────────────────────────────────
                 ZStack(alignment: .topLeading) {
                     Color.clear
-                    ForEach(marks, id: \.label) { label, lufs in
+                    ForEach(marks, id: \.label) { label, db in
                         HStack(spacing: 4) {
                             Text(label)
                                 .font(.system(size: 8.5, design: .monospaced))
@@ -41,49 +50,52 @@ struct LUFSBarMeterView: View {
                                 .frame(width: 6, height: 0.5)
                         }
                         .frame(height: 10)
-                        .offset(y: yOffset(lufs: lufs, usableH: usableH) + padV - 5)
+                        .offset(y: yOffset(db: db, usableH: usableH) + padV - 5)
                     }
                 }
                 .frame(width: 36)
 
-                // ── Bars ──────────────────────────────────────────────────
-                HStack(spacing: 5) {
-                    BarStrip(value: lufsM, peak: lufsMPeak,
-                             rangeMin: rangeMin, rangeMax: rangeMax,
-                             color: Color(white: 0.80))
+                // ── Bars: [L peak][R peak]   [S LUFS] ─────────────────────
+                HStack(alignment: .center, spacing: 0) {
+                    // Peak meter stereo
+                    HStack(spacing: 3) {
+                        BarStrip(value: peakL, peak: peakHoldL,
+                                 rangeMin: rangeMin, rangeMax: rangeMax,
+                                 color: peakColor, peakColor: holdColor)
+                        BarStrip(value: peakR, peak: peakHoldR,
+                                 rangeMin: rangeMin, rangeMax: rangeMax,
+                                 color: peakColor, peakColor: holdColor)
+                    }
+                    .frame(width: 22)
 
+                    Spacer().frame(width: 7)
+
+                    // Short-term LUFS
                     BarStrip(value: lufsS, peak: lufsSPeak,
                              rangeMin: rangeMin, rangeMax: rangeMax,
-                             color: Color(white: 0.35))
+                             color: shortColor, peakColor: shortColor)
+                        .frame(width: 13)
                 }
                 .padding(.vertical, padV)
-                .frame(width: 38)
 
-                // ── Readout ───────────────────────────────────────────────
+                // ── Readout — Short only ──────────────────────────────────
                 VStack(alignment: .leading, spacing: 0) {
                     Spacer()
-
-                    // Momentary
-                    readoutRow(value: lufsM,
-                               label: "M",
-                               color: Color(white: 0.95),
-                               fontSize: 20)
-
-                    Spacer().frame(height: 10)
-
-                    // Short-Term
-                    readoutRow(value: lufsS,
-                               label: "S",
-                               color: Color(white: 0.50),
-                               fontSize: 15)
-
-                    Spacer().frame(height: 6)
-
-                    Text("LUFS")
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(lufsS <= -140 ? "-∞" : String(format: "%.1f", lufsS))
+                            .font(.system(size: 19, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(white: 0.92))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        Text("LUFS")
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color.white.opacity(0.45))
+                    }
+                    Text("SHORT-TERM")
                         .font(.system(size: 7, weight: .medium, design: .monospaced))
                         .foregroundColor(Color.white.opacity(0.25))
                         .tracking(1.5)
-
+                        .padding(.top, 3)
                     Spacer()
                 }
                 .padding(.leading, 10)
@@ -95,22 +107,8 @@ struct LUFSBarMeterView: View {
 
     // MARK: Helpers
 
-    private func yOffset(lufs: Float, usableH: CGFloat) -> CGFloat {
-        CGFloat((rangeMax - lufs) / (rangeMax - rangeMin)) * usableH
-    }
-
-    @ViewBuilder
-    private func readoutRow(value: Float, label: String, color: Color, fontSize: CGFloat) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(value <= -140 ? "-∞" : String(format: "%.1f", value))
-                .font(.system(size: fontSize, weight: .bold, design: .monospaced))
-                .foregroundColor(color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-            Text(label)
-                .font(.system(size: 8, weight: .medium, design: .monospaced))
-                .foregroundColor(color.opacity(0.5))
-        }
+    private func yOffset(db: Float, usableH: CGFloat) -> CGFloat {
+        CGFloat((rangeMax - db) / (rangeMax - rangeMin)) * usableH
     }
 }
 
@@ -124,6 +122,7 @@ struct BarStrip: View {
     let rangeMin: Float
     let rangeMax: Float
     let color:    Color
+    var peakColor: Color = .orange   // warna garis peak-hold
 
     private func frac(_ v: Float) -> CGFloat {
         guard v > -140 else { return 0 }
@@ -153,7 +152,7 @@ struct BarStrip: View {
             if peak > -140 && pkF > 0 {
                 ctx.fill(Path(CGRect(x: 0, y: h * (1 - pkF) - 1,
                                      width: size.width, height: 2)),
-                         with: .color(color))
+                         with: .color(peakColor))
             }
         }
     }
@@ -163,12 +162,10 @@ struct BarStrip: View {
 
 #Preview {
     HStack(spacing: 0) {
-        Rectangle()
-            .fill(Color.black.opacity(0.6))
-        Rectangle()
-            .fill(Color.white.opacity(0.07))
-            .frame(width: 1)
-        LUFSBarMeterView(lufsM: -9.3, lufsS: -11.1, lufsMPeak: -7.2, lufsSPeak: -8.5)
+        Rectangle().fill(Color.black.opacity(0.6))
+        Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
+        LUFSBarMeterView(peakL: -8, peakR: -5, peakHoldL: -3, peakHoldR: -2,
+                         lufsS: -12.6, lufsSPeak: -10.5)
             .frame(width: 160)
     }
     .frame(width: 680, height: 260)

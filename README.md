@@ -2,6 +2,8 @@
 
 A lightweight macOS system-audio metering app built with SwiftUI. It captures system audio and displays a smooth, scrolling stereo waveform (DAW/oscilloscope style) alongside a stereo peak meter and a BS.1770-4 short-term LUFS meter.
 
+![AudioMeter](docs/screenshot.png)
+
 ## Features
 
 - **Scrolling stereo waveform** — DAW-style min/max peak rendering, smooth 60fps scroll.

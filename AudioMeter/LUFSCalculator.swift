@@ -7,15 +7,6 @@ import Accelerate
 
 final class ChannelLUFSProcessor {
 
-    // ── K-weighting coefficients (48 kHz) ─────────────────────────────────
-    private let b0_1 =  1.53512485958697; private let b1_1 = -2.69169618940638
-    private let b2_1 =  1.19839281085285; private let a1_1 = -1.69065929318241
-    private let a2_1 =  0.73248077421585
-
-    private let b0_2 =  1.0;              private let b1_2 = -2.0
-    private let b2_2 =  1.0;             private let a1_2 = -1.99004745483398
-    private let a2_2 =  0.99007225036621
-
     // ── vDSP biquad (SIMD-accelerated) ───────────────────────────────────
     private var biquad: vDSP.Biquad<Float>
 
@@ -29,10 +20,9 @@ final class ChannelLUFSProcessor {
     private let recomputeInterval: Int
 
     init(sampleRate: Double = 48_000) {
-        let coeffs: [Double] = [
-            b0_1, b1_1, b2_1, a1_1, a2_1,
-            b0_2, b1_2, b2_2, a1_2, a2_2
-        ]
+        // K-weighting BS.1770-4 dihitung untuk sample rate aktual (adaptive).
+        // Di 48 kHz hasilnya identik dengan koefisien standar ITU.
+        let coeffs = Self.kWeightingCoefficients(sampleRate: sampleRate)
         biquad = vDSP.Biquad(coefficients: coeffs,
                               channelCount: 1,
                               sectionCount: 2,
@@ -41,6 +31,38 @@ final class ChannelLUFSProcessor {
         momentaryBuf = Array(repeating: 0, count: Int(sampleRate * 0.4))
         shortTermBuf = Array(repeating: 0, count: Int(sampleRate * 3.0))
         recomputeInterval = Int(sampleRate * 0.1)
+    }
+
+    // BS.1770-4 K-weighting via bilinear transform — berlaku untuk fs apa pun
+    // (44.1k, 48k, 88.2k, 96k, dst). Stage 1: high-shelf, Stage 2: high-pass.
+    private static func kWeightingCoefficients(sampleRate fs: Double) -> [Double] {
+        // Stage 1 — high-shelf
+        let f0s = 1681.974450955533
+        let Gs  = 3.999843853973347      // dB
+        let Qs  = 0.7071752369554196
+        let K1  = tan(Double.pi * f0s / fs)
+        let Vh  = pow(10.0, Gs / 20.0)
+        let Vb  = pow(Vh, 0.4996667741545416)
+        let a0s = 1 + K1 / Qs + K1 * K1
+        let b0_1 = (Vh + Vb * K1 / Qs + K1 * K1) / a0s
+        let b1_1 = 2 * (K1 * K1 - Vh) / a0s
+        let b2_1 = (Vh - Vb * K1 / Qs + K1 * K1) / a0s
+        let a1_1 = 2 * (K1 * K1 - 1) / a0s
+        let a2_1 = (1 - K1 / Qs + K1 * K1) / a0s
+
+        // Stage 2 — high-pass (numerator [1,-2,1] sesuai konvensi ITU)
+        let f0h = 38.13547087602444
+        let Qh  = 0.5003270373238773
+        let K2  = tan(Double.pi * f0h / fs)
+        let a0h = 1 + K2 / Qh + K2 * K2
+        let b0_2 =  1.0
+        let b1_2 = -2.0
+        let b2_2 =  1.0
+        let a1_2 = 2 * (K2 * K2 - 1) / a0h
+        let a2_2 = (1 - K2 / Qh + K2 * K2) / a0h
+
+        return [b0_1, b1_1, b2_1, a1_1, a2_1,
+                b0_2, b1_2, b2_2, a1_2, a2_2]
     }
 
     func process(_ samples: [Float]) -> (mMeanSq: Double, sMeanSq: Double) {

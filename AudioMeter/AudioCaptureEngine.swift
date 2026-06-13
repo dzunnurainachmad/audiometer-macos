@@ -196,7 +196,7 @@ class AudioCaptureEngine: NSObject, ObservableObject {
         }
 
         // 6. Install audio tap — terima AVAudioPCMBuffer, proses di processingQueue
-        engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) {
+        engine.inputNode.installTap(onBus: 0, bufferSize: 512, format: hwFormat) {
             [weak self] buffer, _ in
             guard let self, let data = buffer.floatChannelData else { return }
             let n     = Int(buffer.frameLength)
